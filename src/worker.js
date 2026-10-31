@@ -1,6 +1,7 @@
 // Cloudflare Pages "advanced mode" worker.
 // Put this file next to index.html in the folder you upload.
 //  - /api/lat/{lat}/lon/{lon}/dist/{nm}  -> relays to a community ADS-B feed and adds CORS headers
+//  - /api/info/{hex}?callsign=ABC123     -> aircraft details + route from adsbdb.com
 //  - everything else                     -> served from your uploaded static files (index.html)
 
 const UPSTREAMS = [
@@ -14,6 +15,22 @@ const CORS = {
   "Access-Control-Allow-Headers": "*",
 };
 
+// Looks up one record from adsbdb.com (free aircraft/airline/route database).
+// Returns the named part of the response, or null if unknown or the lookup fails.
+async function adsbdb(path, key) {
+  try {
+    const res = await fetch(`https://api.adsbdb.com/v0/${path}`, {
+      headers: { "User-Agent": "personal-flight-map (non-commercial)" },
+      cf: { cacheEverything: true, cacheTtlByStatus: { "200-299": 3600, "404": 900, "500-599": 0 } },
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json && json.response && typeof json.response === "object" ? (json.response[key] ?? null) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -23,6 +40,19 @@ export default {
     }
 
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+
+    // /api/info/{icao24hex}?callsign=BAW117  -> aircraft details + flight route (airline, origin, destination)
+    const im = url.pathname.match(/^\/api\/info\/([0-9a-fA-F]{6})$/);
+    if (im) {
+      const callsign = (url.searchParams.get("callsign") || "").trim().toUpperCase();
+      const [aircraft, flightroute] = await Promise.all([
+        adsbdb(`aircraft/${im[1].toLowerCase()}`, "aircraft"),
+        /^[A-Z0-9]{2,8}$/.test(callsign) ? adsbdb(`callsign/${callsign}`, "flightroute") : null,
+      ]);
+      return new Response(JSON.stringify({ aircraft, flightroute }), {
+        headers: { ...CORS, "Content-Type": "application/json", "Cache-Control": "public, max-age=600" },
+      });
+    }
 
     const m = url.pathname.match(/^\/api\/lat\/(-?\d+(?:\.\d+)?)\/lon\/(-?\d+(?:\.\d+)?)\/dist\/(\d+)$/);
     if (!m) {

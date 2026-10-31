@@ -37,6 +37,15 @@
   .leaflet-popup-content b { font-size: 15px; }
   .row { display: flex; justify-content: space-between; gap: 16px; }
   .row span:first-child { color: #667; }
+  .row span:last-child { text-align: right; }
+  .muted { color: #889; font-size: 12px; margin: 4px 0; }
+  .airline { font-size: 12px; color: #667; margin-bottom: 2px; }
+  .route { margin: 6px 0 8px; padding: 8px 10px; border-radius: 8px; background: rgba(120,140,170,.15); }
+  .route .codes { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 20px; font-weight: 700; letter-spacing: .5px; }
+  .route .arrow { flex: 1; text-align: center; color: #889; font-weight: 400; }
+  .route .cities { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; color: #667; margin-top: 2px; }
+  .route .cities span:last-child { text-align: right; }
+  .apt-tip { font-weight: 700; }
 </style>
 </head>
 <body>
@@ -86,7 +95,7 @@ function altColour(alt) {
 function planeIcon(ac) {
   const colour = altColour(ac.alt_baro);
   const rot = ac.track ?? 0;
-  const label = (ac.flight || "").trim() || ac.r || ac.hex;
+  const label = esc((ac.flight || "").trim() || ac.r || ac.hex);
   return L.divIcon({
     className: "",
     iconSize: [24, 24],
@@ -109,19 +118,134 @@ function fmtAlt(a) {
   return a >= 18000 ? `FL${Math.round(a / 100)}` : `${a.toLocaleString()} ft`;
 }
 
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// ---- Aircraft / route details (looked up when you tap a plane) ----
+// infoCache values: {aircraft, flightroute} | "none" | "error"; undefined = not requested yet.
+const infoCache = new Map();
+const infoPending = new Set();
+const infoKey = ac => ac.hex + "|" + (ac.flight || "").trim();
+
+async function loadInfo(ac) {
+  const key = infoKey(ac);
+  const cached = infoCache.get(key);
+  if (infoPending.has(key) || (cached && cached !== "error")) return;
+  if (!/^[0-9a-f]{6}$/i.test(ac.hex)) { infoCache.set(key, "none"); return; }   // e.g. TIS-B targets
+  infoPending.add(key);
+  try {
+    const cs = (ac.flight || "").trim();
+    const q = cs ? `?callsign=${encodeURIComponent(cs)}` : "";
+    const res = await fetch(`${PROXY_URL}/api/info/${ac.hex}${q}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const json = await res.json();
+    infoCache.set(key, json.aircraft || json.flightroute ? json : "none");
+  } catch (e) {
+    infoCache.set(key, "error");
+  } finally {
+    infoPending.delete(key);
+  }
+}
+
+function distNm(lat1, lon1, lat2, lon2) {
+  const t = Math.PI / 180, dLat = (lat2 - lat1) * t, dLon = (lon2 - lon1) * t;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * t) * Math.cos(lat2 * t) * Math.sin(dLon / 2) ** 2;
+  return 2 * 3440.065 * Math.asin(Math.sqrt(x));
+}
+
+function fmtDur(min) {
+  if (min < 1) return "<1 min";
+  return min < 60 ? `${Math.round(min)} min` : `${Math.floor(min / 60)} h ${Math.round(min % 60)} min`;
+}
+
 function popupHtml(ac) {
-  const callsign = (ac.flight || "").trim() || "No callsign";
-  const row = (k, v) => `<div class="row"><span>${k}</span><span>${v ?? "–"}</span></div>`;
+  const callsign = (ac.flight || "").trim();
+  const info = infoCache.get(infoKey(ac));
+  const ready = info && typeof info === "object";
+  const fr = ready ? info.flightroute : null;
+  const am = ready ? info.aircraft : null;
+  const row = (k, v) => v == null || v === "" ? "" : `<div class="row"><span>${k}</span><span>${esc(v)}</span></div>`;
+  const rowAlways = (k, v) => `<div class="row"><span>${k}</span><span>${esc(v ?? "–")}</span></div>`;
+
+  const airline = fr?.airline?.name || null;
+
+  // Route block
+  let routeBlock = "";
+  let toGo = null;
+  if (fr?.origin && fr?.destination) {
+    const o = fr.origin, d = fr.destination;
+    const code = a => a.iata_code || a.icao_code || "?";
+    const city = a => a.municipality || a.name || "";
+    routeBlock = `
+      <div class="route">
+        <div class="codes"><span>${esc(code(o))}</span><span class="arrow">✈</span><span>${esc(code(d))}</span></div>
+        <div class="cities"><span>${esc(city(o))}</span><span>${esc(city(d))}</span></div>
+      </div>`;
+    if (d.latitude != null && d.longitude != null && ac.alt_baro !== "ground" && ac.gs > 50) {
+      const nm = distNm(ac.lat, ac.lon, d.latitude, d.longitude);
+      toGo = `${Math.round(nm).toLocaleString()} nm · ~${fmtDur(nm / ac.gs * 60)}`;
+    }
+  } else if (info === undefined) {
+    routeBlock = `<div class="muted">Looking up route…</div>`;
+  } else if (info === "error") {
+    routeBlock = `<div class="muted">Route lookup failed. Tap the plane again to retry.</div>`;
+  } else if (callsign) {
+    routeBlock = `<div class="muted">No route on file for ${esc(callsign)}</div>`;
+  }
+
+  const model = am ? [am.manufacturer, am.type].filter(Boolean).join(" ") : "";
+  const aircraftName = model || ac.desc || ac.t;
+
   return `
-    <b>${callsign}</b>
-    ${row("Type", ac.t || ac.desc)}
-    ${row("Reg", ac.r)}
-    ${row("Altitude", fmtAlt(ac.alt_baro))}
-    ${row("Speed", ac.gs != null ? Math.round(ac.gs) + " kt" : null)}
-    ${row("Heading", ac.track != null ? Math.round(ac.track) + "°" : null)}
+    <b>${esc(callsign || "No callsign")}</b>
+    ${airline ? `<div class="airline">${esc(airline)}</div>` : ""}
+    ${routeBlock}
+    ${row("To go (approx.)", toGo)}
+    ${rowAlways("Aircraft", aircraftName)}
+    ${row("Type code", ac.t)}
+    ${row("Reg", ac.r || am?.registration)}
+    ${row("Owner", am?.registered_owner)}
+    ${row("Registered in", am?.registered_owner_country_name)}
+    ${row("Built", ac.year)}
+    ${rowAlways("Altitude", fmtAlt(ac.alt_baro))}
+    ${rowAlways("Speed", ac.gs != null ? Math.round(ac.gs) + " kt" : null)}
+    ${rowAlways("Heading", ac.track != null ? Math.round(ac.track) + "°" : null)}
     ${row("Vert. rate", ac.baro_rate != null ? ac.baro_rate + " ft/min" : null)}
     ${row("Squawk", ac.squawk)}
-    ${row("ICAO hex", ac.hex)}`;
+    ${row("ICAO hex", ac.hex)}
+    ${fr ? `<div class="muted">Route comes from a schedule database, so it can differ from today's actual flight.</div>` : ""}`;
+}
+
+// Dashed line origin → plane → destination for the selected aircraft
+let routeLayer = null;
+function clearRoute() {
+  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+}
+function drawRoute(ac) {
+  clearRoute();
+  const info = infoCache.get(infoKey(ac));
+  const fr = info && typeof info === "object" ? info.flightroute : null;
+  if (!fr?.origin || !fr?.destination) return;
+  const o = fr.origin, d = fr.destination;
+  if (o.latitude == null || d.latitude == null) return;
+  const oPos = [o.latitude, o.longitude], dPos = [d.latitude, d.longitude];
+  routeLayer = L.layerGroup([
+    L.polyline([oPos, [ac.lat, ac.lon], dPos], { color: "#63b3ff", weight: 2, opacity: .8, dashArray: "6 6" }),
+    L.circleMarker(oPos, { radius: 5, color: "#fff", weight: 2, fillColor: "#63b3ff", fillOpacity: 1 })
+      .bindTooltip(esc(o.iata_code || o.icao_code || ""), { permanent: true, direction: "top", className: "apt-tip" }),
+    L.circleMarker(dPos, { radius: 5, color: "#fff", weight: 2, fillColor: "#ff6b6b", fillOpacity: 1 })
+      .bindTooltip(esc(d.iata_code || d.icao_code || ""), { permanent: true, direction: "top", className: "apt-tip" }),
+  ]).addTo(map);
+}
+
+async function openPlane(entry) {
+  const hex = entry.data.hex;
+  await loadInfo(entry.data);
+  const current = aircraft.get(hex);
+  if (current && current.marker.isPopupOpen()) {
+    current.marker.getPopup().setContent(popupHtml(current.data));
+    drawRoute(current.data);
+  }
 }
 
 // ---- Fetch + draw ----
@@ -162,7 +286,9 @@ function draw(list) {
     let entry = aircraft.get(ac.hex);
     if (!entry) {
       const marker = L.marker(pos, { icon: planeIcon(ac) }).addTo(map);
-      marker.bindPopup(() => popupHtml(entry.data));
+      marker.bindPopup(() => popupHtml(entry.data), { minWidth: 230, maxWidth: 300 });
+      marker.on("popupopen", () => openPlane(entry));
+      marker.on("popupclose", clearRoute);
       const trail = L.polyline([pos], { weight: 2, opacity: 0.5, color: altColour(ac.alt_baro) }).addTo(map);
       entry = { marker, trail, points: [pos], data: ac };
       aircraft.set(ac.hex, entry);
@@ -174,7 +300,10 @@ function draw(list) {
       if (entry.points.length > TRAIL_POINTS) entry.points.shift();
       entry.trail.setLatLngs(entry.points);
       entry.trail.setStyle({ color: altColour(ac.alt_baro) });
-      if (entry.marker.isPopupOpen()) entry.marker.getPopup().setContent(popupHtml(ac));
+      if (entry.marker.isPopupOpen()) {
+        entry.marker.getPopup().setContent(popupHtml(ac));
+        drawRoute(ac);
+      }
     }
   }
   for (const [hex, entry] of aircraft) {
