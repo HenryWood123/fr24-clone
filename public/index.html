@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f1720">
+<title>Overhead</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1720; font-family: system-ui, -apple-system, sans-serif; }
+  #map { position: absolute; inset: 0; background: #1b1f24; }
+  /* Turn the standard OSM tiles into a dark map (set to "none" for a light map) */
+  .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.9) contrast(.9) saturate(.7); }
+  .bar {
+    position: absolute; z-index: 1000; left: 10px; right: 10px;
+    top: calc(env(safe-area-inset-top) + 10px);
+    display: flex; gap: 8px; align-items: center; justify-content: space-between;
+    pointer-events: none;
+  }
+  .pill {
+    pointer-events: auto; background: rgba(15,23,32,.88); color: #e6edf3;
+    padding: 8px 12px; border-radius: 999px; font-size: 13px;
+    border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(6px);
+  }
+  button.pill { font: inherit; font-size: 13px; cursor: pointer; }
+  .plane { transition: transform .2s linear; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
+  .plane svg { display: block; }
+  .label {
+    position: absolute; left: 20px; top: -2px; white-space: nowrap;
+    font-size: 11px; color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000;
+    pointer-events: none;
+  }
+  .leaflet-popup-content { margin: 10px 12px; font-size: 13px; line-height: 1.5; }
+  .leaflet-popup-content b { font-size: 15px; }
+  .row { display: flex; justify-content: space-between; gap: 16px; }
+  .row span:first-child { color: #667; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="bar">
+  <div class="pill" id="status">Starting…</div>
+  <button class="pill" id="locate">📍 Locate me</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// ---- Settings you may want to tweak ----
+// Leave empty when this page is hosted on the same Cloudflare site as _worker.js.
+// For testing on localhost, set it to your deployed site, e.g. "https://flights.pages.dev".
+const PROXY_URL = "";
+const POLL_MS = 8000;
+const MAX_RADIUS_NM = 250;
+const TRAIL_POINTS = 25;
+const DEFAULT_CENTER = [53.7938, -1.7564];          // fallback if location is denied
+const DEFAULT_ZOOM = 9;
+
+// ---- Map ----
+const map = L.map("map", { zoomControl: false, attributionControl: true })
+  .setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 18,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+}).addTo(map);
+
+L.control.zoom({ position: "bottomright" }).addTo(map);
+
+const statusEl = document.getElementById("status");
+const aircraft = new Map();   // hex -> { marker, trail, points }
+let youMarker = null;
+
+// ---- Helpers ----
+function altColour(alt) {
+  if (alt === "ground" || alt == null) return "#9aa5b1";
+  if (alt < 2000)  return "#ff6b6b";
+  if (alt < 10000) return "#ffb347";
+  if (alt < 25000) return "#f4e04d";
+  if (alt < 35000) return "#4fd1c5";
+  return "#63b3ff";
+}
+
+function planeIcon(ac) {
+  const colour = altColour(ac.alt_baro);
+  const rot = ac.track ?? 0;
+  const label = (ac.flight || "").trim() || ac.r || ac.hex;
+  return L.divIcon({
+    className: "",
+    iconSize: [24, 24],
+    iconAnchor: [12, 12],
+    popupAnchor: [0, -10],
+    html: `
+      <div class="plane" style="transform: rotate(${rot}deg)">
+        <svg width="24" height="24" viewBox="0 0 24 24">
+          <path fill="${colour}" stroke="#0f1720" stroke-width="1"
+            d="M12 1.5c.9 0 1.5.8 1.5 1.8v6.2l8 4.6v2.2l-8-2.3v4.6l2.3 1.7V22L12 20.7 8.2 22v-1.7l2.3-1.7v-4.6l-8 2.3v-2.2l8-4.6V3.3c0-1 .6-1.8 1.5-1.8z"/>
+        </svg>
+      </div>
+      <div class="label">${label}</div>`
+  });
+}
+
+function fmtAlt(a) {
+  if (a === "ground") return "On ground";
+  if (a == null) return "–";
+  return a >= 18000 ? `FL${Math.round(a / 100)}` : `${a.toLocaleString()} ft`;
+}
+
+function popupHtml(ac) {
+  const callsign = (ac.flight || "").trim() || "No callsign";
+  const row = (k, v) => `<div class="row"><span>${k}</span><span>${v ?? "–"}</span></div>`;
+  return `
+    <b>${callsign}</b>
+    ${row("Type", ac.t || ac.desc)}
+    ${row("Reg", ac.r)}
+    ${row("Altitude", fmtAlt(ac.alt_baro))}
+    ${row("Speed", ac.gs != null ? Math.round(ac.gs) + " kt" : null)}
+    ${row("Heading", ac.track != null ? Math.round(ac.track) + "°" : null)}
+    ${row("Vert. rate", ac.baro_rate != null ? ac.baro_rate + " ft/min" : null)}
+    ${row("Squawk", ac.squawk)}
+    ${row("ICAO hex", ac.hex)}`;
+}
+
+// ---- Fetch + draw ----
+function viewRadiusNm() {
+  const c = map.getCenter();
+  const corner = map.getBounds().getNorthEast();
+  const nm = map.distance(c, corner) / 1852;
+  return Math.min(MAX_RADIUS_NM, Math.max(10, Math.ceil(nm)));
+}
+
+let inFlight = false;
+async function refresh() {
+  if (inFlight || document.hidden) return;
+  inFlight = true;
+  try {
+    const c = map.getCenter();
+    const r = viewRadiusNm();
+    const lat = c.lat.toFixed(4), lon = c.lng.toFixed(4);
+    const res = await fetch(`${PROXY_URL}/api/lat/${lat}/lon/${lon}/dist/${r}`);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const json = await res.json();
+    const list = (json.ac || json.aircraft || []).filter(a => a.lat != null && a.lon != null);
+    draw(list);
+    const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    statusEl.textContent = `${list.length} aircraft · ${t}`;
+  } catch (e) {
+    statusEl.textContent = "Feed error: " + e.message;
+  } finally {
+    inFlight = false;
+  }
+}
+
+function draw(list) {
+  const seen = new Set();
+  for (const ac of list) {
+    seen.add(ac.hex);
+    const pos = [ac.lat, ac.lon];
+    let entry = aircraft.get(ac.hex);
+    if (!entry) {
+      const marker = L.marker(pos, { icon: planeIcon(ac) }).addTo(map);
+      marker.bindPopup(() => popupHtml(entry.data));
+      const trail = L.polyline([pos], { weight: 2, opacity: 0.5, color: altColour(ac.alt_baro) }).addTo(map);
+      entry = { marker, trail, points: [pos], data: ac };
+      aircraft.set(ac.hex, entry);
+    } else {
+      entry.data = ac;
+      entry.marker.setLatLng(pos);
+      entry.marker.setIcon(planeIcon(ac));
+      entry.points.push(pos);
+      if (entry.points.length > TRAIL_POINTS) entry.points.shift();
+      entry.trail.setLatLngs(entry.points);
+      entry.trail.setStyle({ color: altColour(ac.alt_baro) });
+      if (entry.marker.isPopupOpen()) entry.marker.getPopup().setContent(popupHtml(ac));
+    }
+  }
+  for (const [hex, entry] of aircraft) {
+    if (!seen.has(hex)) {
+      map.removeLayer(entry.marker);
+      map.removeLayer(entry.trail);
+      aircraft.delete(hex);
+    }
+  }
+}
+
+// ---- Location ----
+function locate(initial) {
+  if (!navigator.geolocation) { refresh(); return; }
+  statusEl.textContent = "Finding you…";
+  navigator.geolocation.getCurrentPosition(pos => {
+    const ll = [pos.coords.latitude, pos.coords.longitude];
+    map.setView(ll, 10);
+    if (youMarker) youMarker.setLatLng(ll);
+    else youMarker = L.circleMarker(ll, { radius: 6, color: "#fff", weight: 2, fillColor: "#3b82f6", fillOpacity: 1 }).addTo(map);
+    refresh();
+  }, () => {
+    statusEl.textContent = initial ? "Location off, using default" : "Couldn't get location";
+    refresh();
+  }, { enableHighAccuracy: false, timeout: 8000 });
+}
+
+document.getElementById("locate").addEventListener("click", () => locate(false));
+let moveTimer;
+map.on("moveend", () => { clearTimeout(moveTimer); moveTimer = setTimeout(refresh, 700); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+locate(true);
+setInterval(refresh, POLL_MS);
+</script>
+</body>
+</html>
