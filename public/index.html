@@ -26,7 +26,7 @@
     border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(6px);
   }
   button.pill { font: inherit; font-size: 13px; cursor: pointer; }
-  .plane { transition: transform .2s linear; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
+  .plane { will-change: transform; filter: drop-shadow(0 1px 2px rgba(0,0,0,.7)); }
   .plane svg { display: block; }
   .label {
     position: absolute; left: 20px; top: -2px; white-space: nowrap;
@@ -40,11 +40,13 @@
   .row span:last-child { text-align: right; }
   .muted { color: #889; font-size: 12px; margin: 4px 0; }
   .airline { font-size: 12px; color: #667; margin-bottom: 2px; }
-  .route { margin: 6px 0 8px; padding: 8px 10px; border-radius: 8px; background: rgba(120,140,170,.15); }
+  .route { margin: 6px 0 4px; padding: 8px 10px; border-radius: 8px; background: rgba(120,140,170,.15); }
+  .route.unconfirmed { background: rgba(200,160,60,.14); }
   .route .codes { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 20px; font-weight: 700; letter-spacing: .5px; }
   .route .arrow { flex: 1; text-align: center; color: #889; font-weight: 400; }
   .route .cities { display: flex; justify-content: space-between; gap: 10px; font-size: 11px; color: #667; margin-top: 2px; }
   .route .cities span:last-child { text-align: right; }
+  .route .note { font-size: 11px; color: #667; margin-top: 4px; }
   .apt-tip { font-weight: 700; }
 </style>
 </head>
@@ -58,14 +60,20 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 // ---- Settings you may want to tweak ----
-// Leave empty when this page is hosted on the same Cloudflare site as _worker.js.
-// For testing on localhost, set it to your deployed site, e.g. "https://flights.pages.dev".
+// Leave empty when this page is served by the same Cloudflare Worker as the API.
 const PROXY_URL = "";
-const POLL_MS = 8000;
+const POLL_MS = 6000;               // how often to ask the feed for new positions
 const MAX_RADIUS_NM = 250;
 const TRAIL_POINTS = 25;
 const DEFAULT_CENTER = [53.7938, -1.7564];          // fallback if location is denied
 const DEFAULT_ZOOM = 9;
+
+// Smooth movement
+const FRAME_MS = 33;                // redraw roughly 30 times a second
+const BLEND_MS = 1200;              // new data is eased in over about this long instead of snapping
+const MAX_EXTRAP_S = 25;            // stop predicting if a plane's data is older than this
+const KEEP_MISSING_MS = 15000;      // keep a plane on screen this long if the feed briefly drops it
+const RAD = Math.PI / 180;
 
 // ---- Map ----
 const map = L.map("map", { zoomControl: false, attributionControl: true })
@@ -79,10 +87,17 @@ L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
 L.control.zoom({ position: "bottomright" }).addTo(map);
 
 const statusEl = document.getElementById("status");
-const aircraft = new Map();   // hex -> { marker, trail, points }
+const aircraft = new Map();   // hex -> entry (see makeEntry)
 let youMarker = null;
+let selectedHex = null;
+let zooming = false;
+map.on("zoomstart", () => { zooming = true; });
+map.on("zoomend", () => { zooming = false; });
 
 // ---- Helpers ----
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 function altColour(alt) {
   if (alt === "ground" || alt == null) return "#9aa5b1";
   if (alt < 2000)  return "#ff6b6b";
@@ -92,23 +107,22 @@ function altColour(alt) {
   return "#63b3ff";
 }
 
+const labelFor = ac => (ac.flight || "").trim() || ac.r || ac.hex;
+
 function planeIcon(ac) {
-  const colour = altColour(ac.alt_baro);
-  const rot = ac.track ?? 0;
-  const label = esc((ac.flight || "").trim() || ac.r || ac.hex);
   return L.divIcon({
     className: "",
     iconSize: [24, 24],
     iconAnchor: [12, 12],
     popupAnchor: [0, -10],
     html: `
-      <div class="plane" style="transform: rotate(${rot}deg)">
+      <div class="plane">
         <svg width="24" height="24" viewBox="0 0 24 24">
-          <path fill="${colour}" stroke="#0f1720" stroke-width="1"
+          <path fill="${altColour(ac.alt_baro)}" stroke="#0f1720" stroke-width="1"
             d="M12 1.5c.9 0 1.5.8 1.5 1.8v6.2l8 4.6v2.2l-8-2.3v4.6l2.3 1.7V22L12 20.7 8.2 22v-1.7l2.3-1.7v-4.6l-8 2.3v-2.2l8-4.6V3.3c0-1 .6-1.8 1.5-1.8z"/>
         </svg>
       </div>
-      <div class="label">${label}</div>`
+      <div class="label">${esc(labelFor(ac))}</div>`
   });
 }
 
@@ -118,11 +132,92 @@ function fmtAlt(a) {
   return a >= 18000 ? `FL${Math.round(a / 100)}` : `${a.toLocaleString()} ft`;
 }
 
-const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
-  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// ---- Geometry ----
+const R_NM = 3440.065;
+
+function distNm(lat1, lon1, lat2, lon2) {
+  const dLat = (lat2 - lat1) * RAD, dLon = (lon2 - lon1) * RAD;
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * RAD) * Math.cos(lat2 * RAD) * Math.sin(dLon / 2) ** 2;
+  return 2 * R_NM * Math.asin(Math.sqrt(x));
+}
+
+function bearing(lat1, lon1, lat2, lon2) {
+  const p1 = lat1 * RAD, p2 = lat2 * RAD, dl = (lon2 - lon1) * RAD;
+  const y = Math.sin(dl) * Math.cos(p2);
+  const x = Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+  return (Math.atan2(y, x) / RAD + 360) % 360;
+}
+
+const angDiff = (a, b) => Math.abs(((a - b + 540) % 360) - 180);
+
+function fmtDur(min) {
+  if (min < 1) return "<1 min";
+  return min < 60 ? `${Math.round(min)} min` : `${Math.floor(min / 60)} h ${Math.round(min % 60)} min`;
+}
+
+// ---- Route checking ----
+// Route databases keep one entry per callsign, but a callsign can fly several legs and
+// entries go stale. So every candidate leg is tested against where the plane really is.
+// Returns a score (lower = better fit) or null if the plane can't plausibly be on this leg.
+function fitLeg(a, b, ac) {
+  if (a?.lat == null || a?.lon == null || b?.lat == null || b?.lon == null) return null;
+  const len = distNm(a.lat, a.lon, b.lat, b.lon);
+  if (len < 5) return null;
+  const toA = distNm(a.lat, a.lon, ac.lat, ac.lon);
+  const toB = distNm(b.lat, b.lon, ac.lat, ac.lon);
+  const nearEnd = Math.min(toA, toB);
+
+  // Parked or taxiing: only plausible if it is at one of the two airports
+  if (ac.alt_baro === "ground") return nearEnd < 15 ? nearEnd : null;
+
+  // How far off the straight line between the airports, and how far along it
+  const d13 = toA / R_NM;
+  const t13 = bearing(a.lat, a.lon, ac.lat, ac.lon) * RAD;
+  const t12 = bearing(a.lat, a.lon, b.lat, b.lon) * RAD;
+  const xt = Math.asin(Math.sin(d13) * Math.sin(t13 - t12)) * R_NM;
+  let along = Math.acos(Math.max(-1, Math.min(1, Math.cos(d13) / Math.cos(xt / R_NM)))) * R_NM;
+  if (Math.cos(t13 - t12) < 0) along = -along;
+
+  // The corridor is narrow near the airports and widens towards mid-route (long oceanic
+  // flights can sit a couple of hundred miles off the straight line), but never beyond 250 nm.
+  if (Math.abs(xt) > Math.min(250, 40 + 0.25 * nearEnd)) return null;
+  if (along < -50 || along > len + 50) return null;             // outside the two airports
+
+  let headingPenalty = 0;
+  if (nearEnd > 40 && ac.track != null) {                       // near an airport planes turn, so skip
+    const diff = angDiff(ac.track, bearing(ac.lat, ac.lon, b.lat, b.lon));
+    if (diff > 90) return null;                                 // heading away from the destination
+    headingPenalty = diff / 180 * 20;
+  }
+  return Math.abs(xt) + headingPenalty;
+}
+
+// Picks the best leg across all candidate routes, or reports that none fits.
+function routeFor(ac, info) {
+  if (!info || typeof info !== "object" || !info.routes?.length) return null;
+  const cands = [];
+  for (const r of info.routes) {
+    const aps = r.airports || [];
+    for (let i = 0; i + 1 < aps.length; i++) {
+      const forward = fitLeg(aps[i], aps[i + 1], ac);
+      if (forward != null) cands.push({ source: r.source, from: aps[i], to: aps[i + 1], reversed: false, score: forward });
+      const back = fitLeg(aps[i + 1], aps[i], ac);
+      if (back != null) cands.push({ source: r.source, from: aps[i + 1], to: aps[i], reversed: true, score: back + 5 });
+    }
+  }
+  if (!cands.length) {
+    const first = info.routes.find(r => r.airports?.length >= 2);
+    return first ? { status: "unconfirmed", from: first.airports[0], to: first.airports[first.airports.length - 1] } : null;
+  }
+  cands.sort((x, y) => x.score - y.score);
+  const best = cands[0];
+  const key = c => (c.from.icao || c.from.iata) + ">" + (c.to.icao || c.to.iata);
+  const sources = [...new Set(cands.filter(c => key(c) === key(best)).map(c => c.source))];
+  return { status: "confirmed", from: best.from, to: best.to, reversed: best.reversed, sources };
+}
 
 // ---- Aircraft / route details (looked up when you tap a plane) ----
-// infoCache values: {aircraft, flightroute} | "none" | "error"; undefined = not requested yet.
+// infoCache values: {aircraft, airline, routes} | "none" | "error"; undefined = not requested yet.
 const infoCache = new Map();
 const infoPending = new Set();
 const infoKey = ac => ac.hex + "|" + (ac.flight || "").trim();
@@ -139,7 +234,7 @@ async function loadInfo(ac) {
     const res = await fetch(`${PROXY_URL}/api/info/${ac.hex}${q}`);
     if (!res.ok) throw new Error("HTTP " + res.status);
     const json = await res.json();
-    infoCache.set(key, json.aircraft || json.flightroute ? json : "none");
+    infoCache.set(key, json.aircraft || json.routes?.length ? json : "none");
   } catch (e) {
     infoCache.set(key, "error");
   } finally {
@@ -147,44 +242,41 @@ async function loadInfo(ac) {
   }
 }
 
-function distNm(lat1, lon1, lat2, lon2) {
-  const t = Math.PI / 180, dLat = (lat2 - lat1) * t, dLon = (lon2 - lon1) * t;
-  const x = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * t) * Math.cos(lat2 * t) * Math.sin(dLon / 2) ** 2;
-  return 2 * 3440.065 * Math.asin(Math.sqrt(x));
-}
-
-function fmtDur(min) {
-  if (min < 1) return "<1 min";
-  return min < 60 ? `${Math.round(min)} min` : `${Math.floor(min / 60)} h ${Math.round(min % 60)} min`;
-}
-
 function popupHtml(ac) {
   const callsign = (ac.flight || "").trim();
   const info = infoCache.get(infoKey(ac));
   const ready = info && typeof info === "object";
-  const fr = ready ? info.flightroute : null;
   const am = ready ? info.aircraft : null;
+  const rt = ready ? routeFor(ac, info) : null;
   const row = (k, v) => v == null || v === "" ? "" : `<div class="row"><span>${k}</span><span>${esc(v)}</span></div>`;
   const rowAlways = (k, v) => `<div class="row"><span>${k}</span><span>${esc(v ?? "–")}</span></div>`;
+  const code = a => a.iata || a.icao || "?";
+  const place = a => a.city || a.name || "";
 
-  const airline = fr?.airline?.name || null;
-
-  // Route block
   let routeBlock = "";
   let toGo = null;
-  if (fr?.origin && fr?.destination) {
-    const o = fr.origin, d = fr.destination;
-    const code = a => a.iata_code || a.icao_code || "?";
-    const city = a => a.municipality || a.name || "";
+  if (rt?.status === "confirmed") {
+    const d = rt.to;
+    const note = [
+      `Fits the plane's position (${rt.sources.join(" + ")})`,
+      rt.reversed ? "Direction worked out from its heading" : "",
+    ].filter(Boolean).join(". ");
     routeBlock = `
       <div class="route">
-        <div class="codes"><span>${esc(code(o))}</span><span class="arrow">✈</span><span>${esc(code(d))}</span></div>
-        <div class="cities"><span>${esc(city(o))}</span><span>${esc(city(d))}</span></div>
+        <div class="codes"><span>${esc(code(rt.from))}</span><span class="arrow">✈</span><span>${esc(code(d))}</span></div>
+        <div class="cities"><span>${esc(place(rt.from))}</span><span>${esc(place(d))}</span></div>
+        <div class="note">${esc(note)}</div>
       </div>`;
-    if (d.latitude != null && d.longitude != null && ac.alt_baro !== "ground" && ac.gs > 50) {
-      const nm = distNm(ac.lat, ac.lon, d.latitude, d.longitude);
+    if (d.lat != null && ac.alt_baro !== "ground" && ac.gs > 50) {
+      const nm = distNm(ac.lat, ac.lon, d.lat, d.lon);
       toGo = `${Math.round(nm).toLocaleString()} nm · ~${fmtDur(nm / ac.gs * 60)}`;
     }
+  } else if (rt?.status === "unconfirmed") {
+    routeBlock = `
+      <div class="route unconfirmed">
+        <div class="codes"><span>${esc(code(rt.from))}</span><span class="arrow">?</span><span>${esc(code(rt.to))}</span></div>
+        <div class="note">Route unconfirmed: the database lists this, but the plane's position and heading don't fit it.</div>
+      </div>`;
   } else if (info === undefined) {
     routeBlock = `<div class="muted">Looking up route…</div>`;
   } else if (info === "error") {
@@ -198,7 +290,7 @@ function popupHtml(ac) {
 
   return `
     <b>${esc(callsign || "No callsign")}</b>
-    ${airline ? `<div class="airline">${esc(airline)}</div>` : ""}
+    ${ready && info.airline ? `<div class="airline">${esc(info.airline)}</div>` : ""}
     ${routeBlock}
     ${row("To go (approx.)", toGo)}
     ${rowAlways("Aircraft", aircraftName)}
@@ -212,41 +304,133 @@ function popupHtml(ac) {
     ${rowAlways("Heading", ac.track != null ? Math.round(ac.track) + "°" : null)}
     ${row("Vert. rate", ac.baro_rate != null ? ac.baro_rate + " ft/min" : null)}
     ${row("Squawk", ac.squawk)}
-    ${row("ICAO hex", ac.hex)}
-    ${fr ? `<div class="muted">Route comes from a schedule database, so it can differ from today's actual flight.</div>` : ""}`;
+    ${row("ICAO hex", ac.hex)}`;
 }
 
 // Dashed line origin → plane → destination for the selected aircraft
-let routeLayer = null;
+let routeGeom = null;   // { line, layer, from: [lat, lon], to: [lat, lon] }
 function clearRoute() {
-  if (routeLayer) { map.removeLayer(routeLayer); routeLayer = null; }
+  if (routeGeom) { map.removeLayer(routeGeom.layer); routeGeom = null; }
 }
-function drawRoute(ac) {
+function drawRoute(entry) {
   clearRoute();
+  const ac = entry.data;
   const info = infoCache.get(infoKey(ac));
-  const fr = info && typeof info === "object" ? info.flightroute : null;
-  if (!fr?.origin || !fr?.destination) return;
-  const o = fr.origin, d = fr.destination;
-  if (o.latitude == null || d.latitude == null) return;
-  const oPos = [o.latitude, o.longitude], dPos = [d.latitude, d.longitude];
-  routeLayer = L.layerGroup([
-    L.polyline([oPos, [ac.lat, ac.lon], dPos], { color: "#63b3ff", weight: 2, opacity: .8, dashArray: "6 6" }),
-    L.circleMarker(oPos, { radius: 5, color: "#fff", weight: 2, fillColor: "#63b3ff", fillOpacity: 1 })
-      .bindTooltip(esc(o.iata_code || o.icao_code || ""), { permanent: true, direction: "top", className: "apt-tip" }),
-    L.circleMarker(dPos, { radius: 5, color: "#fff", weight: 2, fillColor: "#ff6b6b", fillOpacity: 1 })
-      .bindTooltip(esc(d.iata_code || d.icao_code || ""), { permanent: true, direction: "top", className: "apt-tip" }),
+  const rt = info && typeof info === "object" ? routeFor(ac, info) : null;
+  if (rt?.status !== "confirmed" || rt.from.lat == null || rt.to.lat == null) return;
+  const from = [rt.from.lat, rt.from.lon], to = [rt.to.lat, rt.to.lon];
+  const line = L.polyline([from, [entry.disp.lat, entry.disp.lon], to],
+    { color: "#63b3ff", weight: 2, opacity: .8, dashArray: "6 6" });
+  const layer = L.layerGroup([
+    line,
+    L.circleMarker(from, { radius: 5, color: "#fff", weight: 2, fillColor: "#63b3ff", fillOpacity: 1 })
+      .bindTooltip(esc(rt.from.iata || rt.from.icao || ""), { permanent: true, direction: "top", className: "apt-tip" }),
+    L.circleMarker(to, { radius: 5, color: "#fff", weight: 2, fillColor: "#ff6b6b", fillOpacity: 1 })
+      .bindTooltip(esc(rt.to.iata || rt.to.icao || ""), { permanent: true, direction: "top", className: "apt-tip" }),
   ]).addTo(map);
+  routeGeom = { line, layer, from, to };
 }
 
 async function openPlane(entry) {
-  const hex = entry.data.hex;
+  selectedHex = entry.data.hex;
   await loadInfo(entry.data);
-  const current = aircraft.get(hex);
+  const current = aircraft.get(entry.data.hex);
   if (current && current.marker.isPopupOpen()) {
     current.marker.getPopup().setContent(popupHtml(current.data));
-    drawRoute(current.data);
+    drawRoute(current);
   }
 }
+
+// ---- Smooth movement ----
+// Each plane reports position, speed and heading a few seconds apart. Between reports we
+// predict where it is from speed and heading (dead reckoning), and when a fresh report
+// disagrees with the prediction the difference is eased out instead of snapping.
+function project(rep, now) {
+  if (rep.ground || rep.gs == null || rep.track == null || rep.gs < 5) return { lat: rep.lat, lon: rep.lon };
+  const dt = Math.min(Math.max((now - rep.t) / 1000, 0), MAX_EXTRAP_S);
+  const nm = rep.gs * dt / 3600;
+  const lat = rep.lat + nm * Math.cos(rep.track * RAD) / 60;
+  const lon = rep.lon + nm * Math.sin(rep.track * RAD) / (60 * Math.cos(rep.lat * RAD));
+  return { lat, lon };
+}
+
+function makeRep(ac, snapT) {
+  return {
+    lat: ac.lat, lon: ac.lon, gs: ac.gs, track: ac.track,
+    ground: ac.alt_baro === "ground",
+    t: snapT - (ac.seen_pos ?? 0) * 1000,       // when the position was actually measured
+  };
+}
+
+function makeEntry(ac, rep) {
+  const marker = L.marker([ac.lat, ac.lon], { icon: planeIcon(ac) }).addTo(map);
+  const el = marker.getElement();
+  const entry = {
+    marker, data: ac, rep,
+    off: { lat: 0, lon: 0 }, offT: 0,                       // correction being eased out
+    disp: { lat: ac.lat, lon: ac.lon, hdg: ac.track ?? 0 }, // where the plane should be right now
+    drawn: { lat: ac.lat, lon: ac.lon, hdg: ac.track ?? 0 },// what was last actually written to the screen
+    els: { plane: el.querySelector(".plane"), path: el.querySelector("path"), label: el.querySelector(".label") },
+    colour: altColour(ac.alt_baro), labelText: labelFor(ac),
+    lastSeen: Date.now(),
+    points: [[ac.lat, ac.lon]],
+    trail: L.polyline([[ac.lat, ac.lon]], { weight: 2, opacity: 0.5, color: altColour(ac.alt_baro) }).addTo(map),
+  };
+  entry.els.plane.style.transform = `rotate(${entry.disp.hdg}deg)`;
+  marker.bindPopup(() => popupHtml(entry.data), { minWidth: 230, maxWidth: 300 });
+  marker.on("popupopen", () => openPlane(entry));
+  marker.on("popupclose", () => { selectedHex = null; clearRoute(); });
+  return entry;
+}
+
+let lastFrame = 0;
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (document.hidden || zooming || ts - lastFrame < FRAME_MS) return;
+  const dt = ts - lastFrame;
+  lastFrame = ts;
+  const now = Date.now();
+  const v = map.getBounds().pad(0.3);
+  const south = v.getSouth(), north = v.getNorth(), west = v.getWest(), east = v.getEast();
+  // Size of half a screen pixel in degrees at this zoom. Planes that haven't moved that far
+  // are left alone, which saves almost all the work when zoomed out over a busy sky.
+  const pxLon = 360 / (256 * 2 ** map.getZoom()) * 0.5;
+
+  for (const entry of aircraft.values()) {
+    const p = project(entry.rep, now);
+    const k = Math.exp(-(now - entry.offT) / (BLEND_MS / 2.5));
+    const lat = p.lat + entry.off.lat * k;
+    const lon = p.lon + entry.off.lon * k;
+
+    // ease the nose towards the reported heading by the short way round
+    const target = entry.rep.track;
+    if (target != null) {
+      const diff = ((target - entry.disp.hdg + 540) % 360) - 180;
+      entry.disp.hdg = (entry.disp.hdg + diff * (1 - Math.exp(-dt / 350)) + 360) % 360;
+    }
+    entry.disp.lat = lat;
+    entry.disp.lon = lon;
+
+    const selected = entry.data.hex === selectedHex;
+    if (!selected && (lat < south || lat > north || lon < west || lon > east)) continue;   // off screen
+
+    const d = entry.drawn;
+    if (selected || Math.abs(lon - d.lon) >= pxLon || Math.abs(lat - d.lat) >= pxLon * Math.cos(lat * RAD)) {
+      entry.marker.setLatLng({ lat, lng: lon });
+      d.lat = lat; d.lon = lon;
+    }
+    if (Math.abs(entry.disp.hdg - d.hdg) >= 0.4) {
+      entry.els.plane.style.transform = `rotate(${entry.disp.hdg.toFixed(1)}deg)`;
+      d.hdg = entry.disp.hdg;
+    }
+
+    if (selected) {
+      entry.trail.setLatLngs([...entry.points, [lat, lon]]);
+      if (routeGeom) routeGeom.line.setLatLngs([routeGeom.from, [lat, lon], routeGeom.to]);
+    }
+  }
+}
+requestAnimationFrame(frame);
 
 // ---- Fetch + draw ----
 function viewRadiusNm() {
@@ -267,8 +451,15 @@ async function refresh() {
     const res = await fetch(`${PROXY_URL}/api/lat/${lat}/lon/${lon}/dist/${r}`);
     if (!res.ok) throw new Error("HTTP " + res.status);
     const json = await res.json();
+
+    // When the feed took its snapshot. Trust it only if this device's clock agrees (within a minute).
+    let snapT = Date.now();
+    let n = Number(json.now);
+    if (n && n < 1e11) n *= 1000;
+    if (n && Math.abs(Date.now() - n) < 60000) snapT = n;
+
     const list = (json.ac || json.aircraft || []).filter(a => a.lat != null && a.lon != null);
-    draw(list);
+    draw(list, snapT);
     const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     statusEl.textContent = `${list.length} aircraft · ${t}`;
   } catch (e) {
@@ -278,38 +469,60 @@ async function refresh() {
   }
 }
 
-function draw(list) {
+function draw(list, snapT) {
+  const now = Date.now();
   const seen = new Set();
   for (const ac of list) {
     seen.add(ac.hex);
-    const pos = [ac.lat, ac.lon];
+    const rep = makeRep(ac, snapT);
     let entry = aircraft.get(ac.hex);
     if (!entry) {
-      const marker = L.marker(pos, { icon: planeIcon(ac) }).addTo(map);
-      marker.bindPopup(() => popupHtml(entry.data), { minWidth: 230, maxWidth: 300 });
-      marker.on("popupopen", () => openPlane(entry));
-      marker.on("popupclose", clearRoute);
-      const trail = L.polyline([pos], { weight: 2, opacity: 0.5, color: altColour(ac.alt_baro) }).addTo(map);
-      entry = { marker, trail, points: [pos], data: ac };
-      aircraft.set(ac.hex, entry);
-    } else {
-      entry.data = ac;
-      entry.marker.setLatLng(pos);
-      entry.marker.setIcon(planeIcon(ac));
-      entry.points.push(pos);
+      aircraft.set(ac.hex, makeEntry(ac, rep));
+      continue;
+    }
+    entry.lastSeen = now;
+    if (rep.t < entry.rep.t) continue;                       // an older snapshot arrived late: ignore it
+
+    // Keep the on-screen position continuous: remember how far the prediction was off, then fade it out
+    const target = project(rep, now);
+    const gapLat = entry.disp.lat - target.lat, gapLon = entry.disp.lon - target.lon;
+    const gapNm = Math.hypot(gapLat * 60, gapLon * 60 * Math.cos(target.lat * RAD));
+    entry.off = gapNm > 3 ? { lat: 0, lon: 0 } : { lat: gapLat, lon: gapLon };   // big jumps just snap
+    entry.offT = now;
+    entry.rep = rep;
+    entry.data = ac;
+
+    const last = entry.points[entry.points.length - 1];
+    if (last[0] !== ac.lat || last[1] !== ac.lon) {
+      entry.points.push([ac.lat, ac.lon]);
       if (entry.points.length > TRAIL_POINTS) entry.points.shift();
       entry.trail.setLatLngs(entry.points);
-      entry.trail.setStyle({ color: altColour(ac.alt_baro) });
-      if (entry.marker.isPopupOpen()) {
-        entry.marker.getPopup().setContent(popupHtml(ac));
-        drawRoute(ac);
-      }
+    }
+
+    const colour = altColour(ac.alt_baro);
+    if (colour !== entry.colour) {
+      entry.colour = colour;
+      entry.els.path.setAttribute("fill", colour);
+      entry.trail.setStyle({ color: colour });
+    }
+    const label = labelFor(ac);
+    if (label !== entry.labelText) {
+      entry.labelText = label;
+      entry.els.label.textContent = label;
+    }
+
+    if (entry.marker.isPopupOpen()) {
+      entry.marker.getPopup().setContent(popupHtml(ac));
+      drawRoute(entry);
     }
   }
+
+  // Drop planes the feed no longer reports, after a short grace period for brief dropouts
   for (const [hex, entry] of aircraft) {
-    if (!seen.has(hex)) {
+    if (!seen.has(hex) && now - entry.lastSeen > KEEP_MISSING_MS) {
       map.removeLayer(entry.marker);
       map.removeLayer(entry.trail);
+      if (selectedHex === hex) { selectedHex = null; clearRoute(); }
       aircraft.delete(hex);
     }
   }
