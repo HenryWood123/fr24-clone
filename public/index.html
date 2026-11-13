@@ -7,15 +7,31 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0f1720">
+<meta name="apple-mobile-web-app-title" content="Overhead">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" type="image/svg+xml" href="/icon.svg">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
 <title>Overhead</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
-  html, body { margin: 0; height: 100%; background: #0f1720; font-family: system-ui, -apple-system, sans-serif; }
+  html, body {
+    margin: 0; height: 100%; background: #0f1720; font-family: system-ui, -apple-system, sans-serif;
+    overscroll-behavior: none;                 /* no rubber-band bounce when installed */
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
   #map { position: absolute; inset: 0; background: #1b1f24; }
+  /* Keep controls clear of the iPhone notch, Dynamic Island and home indicator */
+  .leaflet-bottom { padding-bottom: env(safe-area-inset-bottom); }
+  .leaflet-left   { padding-left: env(safe-area-inset-left); }
+  .leaflet-right  { padding-right: env(safe-area-inset-right); }
   /* Turn the standard OSM tiles into a dark map (set to "none" for a light map) */
   .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.9) contrast(.9) saturate(.7); }
   .bar {
-    position: absolute; z-index: 1000; left: 10px; right: 10px;
+    position: absolute; z-index: 1000;
+    left: max(10px, env(safe-area-inset-left)); right: max(10px, env(safe-area-inset-right));
     top: calc(env(safe-area-inset-top) + 10px);
     display: flex; gap: 8px; align-items: center; justify-content: space-between;
     pointer-events: none;
@@ -75,9 +91,20 @@ const MAX_EXTRAP_S = 25;            // stop predicting if a plane's data is olde
 const KEEP_MISSING_MS = 15000;      // keep a plane on screen this long if the feed briefly drops it
 const RAD = Math.PI / 180;
 
+// ---- Remembered view ----
+// Storage can be empty or blocked (private windows etc.), so every access is guarded.
+function loadSaved(key) { try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; } }
+function save(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ } }
+const saved = loadSaved("overhead.view");
+const validSaved = saved && Math.abs(saved.lat) <= 90 && Math.abs(saved.lng) <= 180 && saved.zoom >= 3 && saved.zoom <= 18;
+
 // ---- Map ----
 const map = L.map("map", { zoomControl: false, attributionControl: true })
-  .setView(DEFAULT_CENTER, DEFAULT_ZOOM);
+  .setView(validSaved ? [saved.lat, saved.lng] : DEFAULT_CENTER, validSaved ? saved.zoom : DEFAULT_ZOOM);
+map.on("moveend", () => {
+  const c = map.getCenter();
+  save("overhead.view", { lat: c.lat, lng: c.lng, zoom: map.getZoom() });
+});
 
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
   maxZoom: 18,
@@ -461,7 +488,7 @@ async function refresh() {
     const list = (json.ac || json.aircraft || []).filter(a => a.lat != null && a.lon != null);
     draw(list, snapT);
     const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    statusEl.textContent = `${list.length} aircraft · ${t}`;
+    statusEl.textContent = `${list.length} aircraft · ${t}${locNote}`;
   } catch (e) {
     statusEl.textContent = "Feed error: " + e.message;
   } finally {
@@ -529,19 +556,23 @@ function draw(list, snapT) {
 }
 
 // ---- Location ----
+// iPhone home-screen apps can lose or re-ask for location permission, so a failed fix is never
+// fatal: the map just stays where you last left it, and the status pill says what happened.
+let locNote = "";
 function locate(initial) {
-  if (!navigator.geolocation) { refresh(); return; }
+  if (!navigator.geolocation) { locNote = " · no location"; refresh(); return; }
   statusEl.textContent = "Finding you…";
   navigator.geolocation.getCurrentPosition(pos => {
+    locNote = "";
     const ll = [pos.coords.latitude, pos.coords.longitude];
-    map.setView(ll, 10);
+    map.setView(ll, Math.max(map.getZoom(), 10));
     if (youMarker) youMarker.setLatLng(ll);
     else youMarker = L.circleMarker(ll, { radius: 6, color: "#fff", weight: 2, fillColor: "#3b82f6", fillOpacity: 1 }).addTo(map);
     refresh();
-  }, () => {
-    statusEl.textContent = initial ? "Location off, using default" : "Couldn't get location";
+  }, err => {
+    locNote = err.code === 1 ? " · location blocked" : " · no location fix";
     refresh();
-  }, { enableHighAccuracy: false, timeout: 8000 });
+  }, { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 });
 }
 
 document.getElementById("locate").addEventListener("click", () => locate(false));
@@ -551,6 +582,11 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) refr
 
 locate(true);
 setInterval(refresh, POLL_MS);
+
+// Lets the app open instantly and launch without signal (see sw.js)
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => { navigator.serviceWorker.register("/sw.js").catch(() => {}); });
+}
 </script>
 </body>
 </html>
