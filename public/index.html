@@ -49,7 +49,11 @@
     font-size: 11px; color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000;
     pointer-events: none;
   }
-  .leaflet-popup-content { margin: 10px 12px; font-size: 13px; line-height: 1.5; }
+  .leaflet-popup-content {
+    margin: 10px 12px; font-size: 13px; line-height: 1.5;
+    max-height: calc(100vh - 200px); max-height: calc(100dvh - 200px);   /* tall cards scroll instead of running off a small screen */
+    overflow-y: auto; -webkit-overflow-scrolling: touch;
+  }
   .leaflet-popup-content b { font-size: 15px; }
   .row { display: flex; justify-content: space-between; gap: 16px; }
   .row span:first-child { color: #667; }
@@ -64,14 +68,109 @@
   .route .cities span:last-child { text-align: right; }
   .route .note { font-size: 11px; color: #667; margin-top: 4px; }
   .apt-tip { font-weight: 700; }
+
+  [hidden] { display: none !important; }
+  #status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btns { display: flex; gap: 8px; flex: none; }
+  button.icon { width: 44px; height: 36px; padding: 0; font-size: 17px; line-height: 1; }
+
+  /* Search */
+  #search {
+    position: absolute; z-index: 1100;
+    left: max(10px, env(safe-area-inset-left)); right: max(10px, env(safe-area-inset-right));
+    top: calc(env(safe-area-inset-top) + 58px);
+    max-height: 62vh; display: flex; flex-direction: column;
+    background: rgba(15,23,32,.96); color: #e6edf3; padding: 10px; border-radius: 16px;
+    border: 1px solid rgba(255,255,255,.14); backdrop-filter: blur(8px);
+  }
+  #searchForm { display: flex; gap: 8px; }
+  #q {
+    flex: 1; min-width: 0; font: inherit; font-size: 16px;      /* 16px stops iOS zooming in on focus */
+    padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.18);
+    background: #0b1118; color: #e6edf3;
+  }
+  #searchForm button {
+    font: inherit; font-size: 15px; border-radius: 10px; padding: 0 14px;
+    border: 1px solid rgba(255,255,255,.18); background: #1c2b3a; color: #e6edf3; cursor: pointer;
+  }
+  #results { overflow-y: auto; margin-top: 8px; -webkit-overflow-scrolling: touch; }
+  .res {
+    display: block; width: 100%; text-align: left; background: none; border: 0; cursor: pointer;
+    border-top: 1px solid rgba(255,255,255,.08); color: inherit; padding: 9px 4px; font: inherit;
+  }
+  .res .r1 b { font-size: 15px; }
+  .res .r1 i { color: #8fb4d8; font-style: normal; margin-left: 8px; font-size: 12px; }
+  .res .r2 { display: block; font-size: 12px; color: #93a1b0; margin-top: 1px; }
+  .hint { font-size: 12.5px; color: #93a1b0; padding: 8px 4px; line-height: 1.45; }
+
+  /* Your photos (inside the popup) */
+  .pop-photos { margin-bottom: 6px; }
+  .pop-photos:empty { display: none; }
+  .pop-photos .hero { display: block; width: 100%; height: 120px; object-fit: cover; border-radius: 8px; cursor: pointer; background: #dde3ea; }
+  .thumbs { display: flex; gap: 6px; overflow-x: auto; padding: 6px 0 2px; -webkit-overflow-scrolling: touch; }
+  .thumbs img, .thumbs button { flex: none; width: 48px; height: 48px; border-radius: 6px; object-fit: cover; cursor: pointer; }
+  .thumbs button, .addphoto { border: 1px dashed #9aa5b1; background: rgba(120,140,170,.12); color: #556; font: inherit; }
+  .thumbs button { font-size: 20px; }
+  .addphoto { padding: 6px 10px; border-radius: 8px; cursor: pointer; font-size: 12px; }
+
+  #lightbox {
+    position: fixed; inset: 0; z-index: 3000; background: #000;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #lbImg { max-width: 100%; max-height: 100%; object-fit: contain; }
+  .lb-top, .lb-bottom {
+    position: absolute; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 10px 14px; color: #e6edf3; font-size: 13px;
+  }
+  .lb-top { top: env(safe-area-inset-top); background: linear-gradient(rgba(0,0,0,.6), transparent); }
+  .lb-bottom { bottom: env(safe-area-inset-bottom); background: linear-gradient(transparent, rgba(0,0,0,.6)); }
+  .lb-top button, .lb-bottom button {
+    font: inherit; font-size: 15px; color: #e6edf3; background: rgba(255,255,255,.14); border: 0;
+    border-radius: 10px; padding: 9px 14px; cursor: pointer;
+  }
+  .lb-bottom .del { color: #ff9a9a; }
+
+  #toast {
+    position: fixed; z-index: 4000; left: 50%; transform: translateX(-50%);
+    bottom: calc(env(safe-area-inset-bottom) + 70px); max-width: 86vw; text-align: center;
+    background: rgba(15,23,32,.95); color: #e6edf3; font-size: 13px; padding: 9px 14px; border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.14);
+  }
 </style>
 </head>
 <body>
 <div id="map"></div>
 <div class="bar">
   <div class="pill" id="status">Starting…</div>
-  <button class="pill" id="locate">📍 Locate me</button>
+  <div class="btns">
+    <button class="pill icon" id="searchBtn" aria-label="Search flights">🔍</button>
+    <button class="pill icon" id="locate" aria-label="Locate me">📍</button>
+  </div>
 </div>
+
+<div id="search" hidden>
+  <form id="searchForm" autocomplete="off">
+    <input id="q" type="search" enterkeyhint="search" autocapitalize="characters" autocorrect="off"
+           spellcheck="false" placeholder="BA117, BAW117, G-XWBA, A388…">
+    <button type="submit">Go</button>
+    <button type="button" id="searchClose" aria-label="Close search">✕</button>
+  </form>
+  <div id="results"></div>
+</div>
+
+<input type="file" id="photoInput" accept="image/*" multiple hidden>
+
+<div id="lightbox" hidden>
+  <img id="lbImg" alt="">
+  <div class="lb-top"><span id="lbCap"></span><button type="button" id="lbClose" aria-label="Close">✕</button></div>
+  <div class="lb-bottom">
+    <button type="button" id="lbPrev" aria-label="Previous">‹</button>
+    <button type="button" id="lbDel" class="del">Delete</button>
+    <span id="lbCount"></span>
+    <button type="button" id="lbNext" aria-label="Next">›</button>
+  </div>
+</div>
+<div id="toast" hidden></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
@@ -358,12 +457,43 @@ function drawRoute(entry) {
   routeGeom = { line, layer, from, to };
 }
 
+// The popup is built once per plane. Only its text part is rewritten when data changes, so the
+// photo section (and any file picker you have open) is never torn down by a refresh.
+function refreshPopup(entry) {
+  if (!entry.marker.isPopupOpen()) return;
+  const el = entry.marker.getPopup().getElement();
+  const before = el.offsetHeight;
+  entry.popupEl.querySelector(".pop-info").innerHTML = popupHtml(entry.data);
+  if (el.offsetHeight !== before) keepPopupInView(entry);
+}
+
+// Leaflet's built-in auto-pan is switched off for these popups: it re-checks on every movement of
+// the plane, and a tall popup never quite fits, so it kept nudging the map (and re-attaching the
+// popup's content, which resets the photo strip and can swallow taps). Instead the map is moved
+// once, when the popup opens or changes height, just enough to bring it fully into view.
+function keepPopupInView(entry) {
+  const popup = entry.marker.getPopup();
+  const el = popup && popup.getElement();
+  if (!el || !entry.marker.isPopupOpen()) return;
+  const r = el.getBoundingClientRect();
+  const m = map.getContainer().getBoundingClientRect();
+  const topLimit = document.querySelector(".bar").getBoundingClientRect().bottom + 10;   // keep clear of the top buttons
+  const pad = 10;
+  let dx = 0, dy = 0;
+  if (r.top < topLimit) dy = r.top - topLimit;
+  if (r.right > m.right - pad) dx = r.right - (m.right - pad);
+  if (r.left < m.left + pad) dx = r.left - (m.left + pad);
+  if (Math.abs(dx) > 1 || Math.abs(dy) > 1) map.panBy([dx, dy], { animate: true, duration: 0.25 });
+}
+
 async function openPlane(entry) {
   selectedHex = entry.data.hex;
+  refreshPopup(entry);
+  renderPhotos(entry);
   await loadInfo(entry.data);
   const current = aircraft.get(entry.data.hex);
   if (current && current.marker.isPopupOpen()) {
-    current.marker.getPopup().setContent(popupHtml(current.data));
+    refreshPopup(current);
     drawRoute(current);
   }
 }
@@ -404,9 +534,12 @@ function makeEntry(ac, rep) {
     trail: L.polyline([[ac.lat, ac.lon]], { weight: 2, opacity: 0.5, color: altColour(ac.alt_baro) }).addTo(map),
   };
   entry.els.plane.style.transform = `rotate(${entry.disp.hdg}deg)`;
-  marker.bindPopup(() => popupHtml(entry.data), { minWidth: 230, maxWidth: 300 });
-  marker.on("popupopen", () => openPlane(entry));
-  marker.on("popupclose", () => { selectedHex = null; clearRoute(); });
+  entry.popupEl = document.createElement("div");
+  entry.popupEl.innerHTML = '<div class="pop-photos"></div><div class="pop-info"></div>';
+  L.DomEvent.disableClickPropagation(entry.popupEl);   // dragging the photo strip must not pan the map
+  marker.bindPopup(entry.popupEl, { minWidth: 270, maxWidth: 270, autoPan: false });
+  marker.on("popupopen", () => { openPlane(entry); requestAnimationFrame(() => keepPopupInView(entry)); });
+  marker.on("popupclose", () => { selectedHex = null; clearRoute(); releasePhotoUrls(entry); });
   return entry;
 }
 
@@ -442,7 +575,7 @@ function frame(ts) {
     if (!selected && (lat < south || lat > north || lon < west || lon > east)) continue;   // off screen
 
     const d = entry.drawn;
-    if (selected || Math.abs(lon - d.lon) >= pxLon || Math.abs(lat - d.lat) >= pxLon * Math.cos(lat * RAD)) {
+    if (Math.abs(lon - d.lon) >= pxLon || Math.abs(lat - d.lat) >= pxLon * Math.cos(lat * RAD)) {
       entry.marker.setLatLng({ lat, lng: lon });
       d.lat = lat; d.lon = lon;
     }
@@ -467,6 +600,13 @@ function viewRadiusNm() {
   return Math.min(MAX_RADIUS_NM, Math.max(10, Math.ceil(nm)));
 }
 
+// When the feed took its snapshot. Trust it only if this device's clock agrees (within a minute).
+function snapTime(nowField) {
+  let n = Number(nowField);
+  if (n && n < 1e11) n *= 1000;
+  return n && Math.abs(Date.now() - n) < 60000 ? n : Date.now();
+}
+
 let inFlight = false;
 async function refresh() {
   if (inFlight || document.hidden) return;
@@ -479,12 +619,7 @@ async function refresh() {
     if (!res.ok) throw new Error("HTTP " + res.status);
     const json = await res.json();
 
-    // When the feed took its snapshot. Trust it only if this device's clock agrees (within a minute).
-    let snapT = Date.now();
-    let n = Number(json.now);
-    if (n && n < 1e11) n *= 1000;
-    if (n && Math.abs(Date.now() - n) < 60000) snapT = n;
-
+    const snapT = snapTime(json.now);
     const list = (json.ac || json.aircraft || []).filter(a => a.lat != null && a.lon != null);
     draw(list, snapT);
     const t = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -496,7 +631,9 @@ async function refresh() {
   }
 }
 
-function draw(list, snapT) {
+// Adds or updates planes from a feed snapshot. With prune on (the normal polling case) planes
+// the feed no longer reports are removed; a search result is added with prune off.
+function draw(list, snapT, prune = true) {
   const now = Date.now();
   const seen = new Set();
   for (const ac of list) {
@@ -539,10 +676,11 @@ function draw(list, snapT) {
     }
 
     if (entry.marker.isPopupOpen()) {
-      entry.marker.getPopup().setContent(popupHtml(ac));
+      refreshPopup(entry);
       drawRoute(entry);
     }
   }
+  if (!prune) return;
 
   // Drop planes the feed no longer reports, after a short grace period for brief dropouts
   for (const [hex, entry] of aircraft) {
@@ -554,6 +692,304 @@ function draw(list, snapT) {
     }
   }
 }
+
+// ---- Small UI helpers ----
+let toastTimer;
+function toast(msg, ms = 2600) {
+  const el = document.getElementById("toast");
+  el.textContent = msg; el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, ms);
+}
+
+// ---- My photos ----
+// Photos you add are stored in this browser (IndexedDB) on this device. They are never uploaded
+// anywhere, and each is filed under the aircraft's registration so it shows up whenever that
+// exact aircraft is on the map. Photos are shrunk before saving to keep storage small.
+const MAX_FULL = 1600, MAX_THUMB = 480;
+const photoInput = document.getElementById("photoInput");
+let pendingPhoto = null;
+let dbPromise = null;
+
+function photoDb() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open("overhead", 1);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore("photos", { keyPath: "id", autoIncrement: true }).createIndex("key", "key");
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => { dbPromise = null; reject(req.error); };
+    });
+  }
+  return dbPromise;
+}
+const photoKey = ac => String(ac.r || ac.hex).toUpperCase();
+
+async function photosFor(key) {
+  const db = await photoDb();
+  return new Promise((resolve, reject) => {
+    const req = db.transaction("photos").objectStore("photos").index("key").getAll(key);
+    req.onsuccess = () => resolve(req.result.sort((a, b) => b.addedAt - a.addedAt));   // newest first
+    req.onerror = () => reject(req.error);
+  });
+}
+async function addPhotoRecord(rec) {
+  const db = await photoDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("photos", "readwrite");
+    tx.objectStore("photos").add(rec);
+    tx.oncomplete = () => resolve();
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  });
+}
+async function deletePhotoRecord(id) {
+  const db = await photoDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("photos", "readwrite");
+    tx.objectStore("photos").delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  });
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("unreadable image")); };
+    img.src = url;
+  });
+}
+function shrinkToBlob(img, max, quality) {
+  const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * scale)), h = Math.max(1, Math.round(img.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = w; canvas.height = h;
+  canvas.getContext("2d").drawImage(img, 0, 0, w, h);   // browsers apply the photo's rotation (EXIF) here
+  return new Promise((resolve, reject) =>
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error("couldn't encode")), "image/jpeg", quality));
+}
+
+async function addPhotoFiles(target, files) {
+  let added = 0, failed = 0;
+  for (const file of files) {
+    try {
+      const img = await loadImage(file);
+      const full = await shrinkToBlob(img, MAX_FULL, 0.85);
+      const thumb = await shrinkToBlob(img, MAX_THUMB, 0.8);
+      await addPhotoRecord({ key: target.key, hex: target.hex, reg: target.reg, type: target.type,
+                             callsign: target.callsign, addedAt: Date.now() + added, full, thumb });
+      added++;
+    } catch (e) { failed++; }
+  }
+  try { navigator.storage?.persist?.(); } catch (e) { /* ignore */ }   // ask the browser not to evict them
+  return { added, failed };
+}
+
+function releasePhotoUrls(entry) {
+  (entry.urls || []).forEach(u => URL.revokeObjectURL(u));
+  entry.urls = [];
+}
+
+async function renderPhotos(entry) {
+  const box = entry.popupEl.querySelector(".pop-photos");
+  const ac = entry.data;
+  let list;
+  try { list = await photosFor(photoKey(ac)); }
+  catch (e) { box.replaceChildren(); return; }               // storage unavailable here: quietly hide the feature
+  if (!entry.marker.isPopupOpen()) return;
+
+  releasePhotoUrls(entry);
+  const url = blob => { const u = URL.createObjectURL(blob); entry.urls.push(u); return u; };
+  const grow = () => keepPopupInView(entry);
+  const add = () => {
+    pendingPhoto = { entry, key: photoKey(ac), hex: ac.hex, reg: ac.r || "", type: ac.t || "", callsign: (ac.flight || "").trim() };
+    photoInput.click();
+  };
+
+  const nodes = [];
+  if (!list.length) {
+    const b = document.createElement("button");
+    b.className = "addphoto"; b.type = "button"; b.textContent = "📷 Add your photo"; b.onclick = add;
+    nodes.push(b);
+  } else {
+    const hero = document.createElement("img");
+    hero.className = "hero"; hero.alt = ""; hero.src = url(list[0].thumb);
+    hero.onload = grow; hero.onclick = () => openLightbox(list, 0, entry);
+    nodes.push(hero);
+    const strip = document.createElement("div");
+    strip.className = "thumbs";
+    list.forEach((p, i) => {
+      const t = document.createElement("img");
+      t.alt = ""; t.src = url(p.thumb); t.onclick = () => openLightbox(list, i, entry);
+      strip.append(t);
+    });
+    const plus = document.createElement("button");
+    plus.type = "button"; plus.textContent = "＋"; plus.setAttribute("aria-label", "Add another photo"); plus.onclick = add;
+    strip.append(plus);
+    nodes.push(strip);
+  }
+  box.replaceChildren(...nodes);
+  grow();
+}
+
+photoInput.addEventListener("change", async () => {
+  const files = [...photoInput.files];
+  photoInput.value = "";                                      // so picking the same photo again still fires
+  const target = pendingPhoto; pendingPhoto = null;
+  if (!target || !files.length) return;
+  toast("Saving…", 15000);
+  const { added, failed } = await addPhotoFiles(target, files);
+  toast(added
+    ? `Added ${added} photo${added > 1 ? "s" : ""}${failed ? `; ${failed} couldn't be read` : ""}`
+    : "Couldn't read that image. Try a JPEG or PNG.");
+  if (target.entry.marker.isPopupOpen()) renderPhotos(target.entry);
+});
+
+// Full-screen viewer
+const lightboxEl = document.getElementById("lightbox");
+const lbImg = document.getElementById("lbImg");
+const lb = { list: [], i: 0, entry: null, url: null };
+
+function showLightbox() {
+  const p = lb.list[lb.i];
+  if (lb.url) URL.revokeObjectURL(lb.url);
+  lb.url = URL.createObjectURL(p.full);
+  lbImg.src = lb.url;
+  const date = new Date(p.addedAt).toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" });
+  document.getElementById("lbCap").textContent = [p.reg || String(p.hex).toUpperCase(), p.type, p.callsign, date].filter(Boolean).join(" · ");
+  const many = lb.list.length > 1;
+  document.getElementById("lbPrev").hidden = !many;
+  document.getElementById("lbNext").hidden = !many;
+  document.getElementById("lbCount").textContent = many ? `${lb.i + 1} / ${lb.list.length}` : "";
+}
+function openLightbox(list, i, entry) { lb.list = list; lb.i = i; lb.entry = entry; showLightbox(); lightboxEl.hidden = false; }
+function closeLightbox() {
+  lightboxEl.hidden = true;
+  lbImg.removeAttribute("src");
+  if (lb.url) { URL.revokeObjectURL(lb.url); lb.url = null; }
+}
+function stepLightbox(d) { lb.i = (lb.i + d + lb.list.length) % lb.list.length; showLightbox(); }
+
+document.getElementById("lbClose").onclick = closeLightbox;
+document.getElementById("lbPrev").onclick = () => stepLightbox(-1);
+document.getElementById("lbNext").onclick = () => stepLightbox(1);
+lightboxEl.addEventListener("click", e => { if (e.target === lightboxEl) closeLightbox(); });
+document.getElementById("lbDel").onclick = async () => {
+  if (!confirm("Delete this photo from this device?")) return;
+  const p = lb.list[lb.i];
+  try { await deletePhotoRecord(p.id); } catch (e) { toast("Couldn't delete that photo"); return; }
+  lb.list.splice(lb.i, 1);
+  if (!lb.list.length) closeLightbox();
+  else { lb.i = Math.min(lb.i, lb.list.length - 1); showLightbox(); }
+  if (lb.entry) renderPhotos(lb.entry);
+};
+let swipeX = null;
+lightboxEl.addEventListener("touchstart", e => { swipeX = e.touches[0].clientX; }, { passive: true });
+lightboxEl.addEventListener("touchend", e => {
+  if (swipeX == null) return;
+  const dx = e.changedTouches[0].clientX - swipeX; swipeX = null;
+  if (Math.abs(dx) > 60 && lb.list.length > 1) stepLightbox(dx < 0 ? 1 : -1);
+});
+
+// ---- Search ----
+// Typing filters the aircraft already on your map instantly; pressing Go also asks the feeds,
+// which finds a plane anywhere in the world as long as it is airborne and being tracked.
+const searchEl = document.getElementById("search");
+const qEl = document.getElementById("q");
+const resultsEl = document.getElementById("results");
+let searchSeq = 0;
+let shown = [];            // what the results list currently shows: [{ ac, snapT }]
+
+function openSearch() { searchEl.hidden = false; qEl.focus(); showLocal(); }
+function closeSearch() { searchEl.hidden = true; qEl.blur(); searchSeq++; }
+
+function hint(text) { shown = []; resultsEl.innerHTML = `<div class="hint">${esc(text)}</div>`; }
+
+function localMatches(q) {
+  const norm = s => String(s || "").toUpperCase().replace(/[\s-]/g, "");
+  const needle = norm(q);
+  if (needle.length < 2) return [];
+  const out = [];
+  for (const e of aircraft.values()) {
+    const a = e.data;
+    if ([(a.flight || "").trim(), a.r, a.hex, a.t].some(f => norm(f).includes(needle))) out.push({ ac: a, snapT: Date.now() });
+  }
+  return out;
+}
+
+function showResults(items, note) {
+  const c = map.getCenter();
+  const nm = a => distNm(c.lat, c.lng, a.lat, a.lon);
+  shown = [...items].sort((x, y) => nm(x.ac) - nm(y.ac)).slice(0, 30);
+  resultsEl.innerHTML = (note ? `<div class="hint">${esc(note)}</div>` : "") + shown.map((r, i) => {
+    const a = r.ac;
+    const title = (a.flight || "").trim() || a.r || a.hex;
+    const detail = [a.r, fmtAlt(a.alt_baro), a.gs != null ? Math.round(a.gs) + " kt" : "",
+                    Math.round(nm(a)).toLocaleString() + " nm from map centre"].filter(Boolean).join(" · ");
+    return `<button type="button" class="res" data-i="${i}"><span class="r1"><b>${esc(title)}</b><i>${esc(a.t || "")}</i></span><span class="r2">${esc(detail)}</span></button>`;
+  }).join("");
+}
+
+function showLocal() {
+  const q = qEl.value.trim();
+  if (q.length < 2) return hint("Search by callsign (BAW117), flight number (BA117), registration (G-XWBA), ICAO hex code or aircraft type (A388). Press Go to search all live aircraft.");
+  const items = localMatches(q);
+  if (items.length) showResults(items, "On your map now. Press Go to search everywhere.");
+  else hint("Nothing on your map matches. Press Go to search everywhere.");
+}
+qEl.addEventListener("input", showLocal);
+
+document.getElementById("searchForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const q = qEl.value.trim();
+  if (q.length < 2) return;
+  const seq = ++searchSeq;
+  hint("Searching…");
+  try {
+    const res = await fetch(`${PROXY_URL}/api/find?q=${encodeURIComponent(q)}`);
+    const json = await res.json();
+    if (seq !== searchSeq) return;                              // a newer search or closing the panel wins
+    if (!res.ok) return hint(json.error || "Search failed.");
+    if (json.failed) return hint("Couldn't reach the flight feeds. Try again in a moment.");
+    const snapT = snapTime(json.now);
+    const items = (json.ac || []).map(ac => ({ ac, snapT }));
+    const have = new Set(items.map(r => r.ac.hex));
+    localMatches(q).forEach(r => { if (!have.has(r.ac.hex)) items.push(r); });
+    if (!items.length) {
+      return hint(`No live aircraft found for "${q.toUpperCase()}". It may not be flying or tracked right now. Airlines broadcast 3-letter callsigns (BAW117), and flight numbers like BA117 are translated for the main airlines.`);
+    }
+    const m = json.matched;
+    const note = m && m.kind === "callsign" && m.value !== json.query ? `Showing ${m.value} for flight number ${json.query}` :
+                 m && m.kind === "type" ? `Aircraft of type ${m.value}, nearest first` : "";
+    showResults(items, note);
+  } catch (err) {
+    if (seq === searchSeq) hint("Search failed. Check your connection and try again.");
+  }
+});
+
+resultsEl.addEventListener("click", e => {
+  const b = e.target.closest(".res");
+  if (b && shown[+b.dataset.i]) pickResult(shown[+b.dataset.i]);
+});
+
+function pickResult(r) {
+  closeSearch();
+  let entry = aircraft.get(r.ac.hex);
+  if (!entry) { draw([r.ac], r.snapT, false); entry = aircraft.get(r.ac.hex); }
+  const at = entry ? [entry.disp.lat, entry.disp.lon] : [r.ac.lat, r.ac.lon];
+  map.setView(at, Math.max(map.getZoom(), 9), { animate: false });
+  if (entry) setTimeout(() => entry.marker.openPopup(), 60);
+}
+
+document.getElementById("searchBtn").addEventListener("click", () => { searchEl.hidden ? openSearch() : closeSearch(); });
+document.getElementById("searchClose").addEventListener("click", closeSearch);
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (!lightboxEl.hidden) closeLightbox(); else if (!searchEl.hidden) closeSearch();
+});
 
 // ---- Location ----
 // iPhone home-screen apps can lose or re-ask for location permission, so a failed fix is never
